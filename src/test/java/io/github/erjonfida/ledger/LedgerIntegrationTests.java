@@ -1,9 +1,15 @@
 package io.github.erjonfida.ledger;
 
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Random;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.Callable;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 import com.jayway.jsonpath.JsonPath;
 import org.junit.jupiter.api.Test;
@@ -57,6 +63,60 @@ class LedgerIntegrationTests {
 	}
 
 	@Test
+	void aRetryWithTheSameKeyReturnsTheFirstResponse() throws Exception {
+		String alice = open("Alice", "EUR");
+		String bob = open("Bob", "EUR");
+		mvc.perform(deposit(alice, 1_000)).andExpect(status().isCreated());
+		String key = UUID.randomUUID().toString();
+
+		String first = mvc.perform(transfer(alice, bob, 300, key))
+			.andExpect(status().isCreated())
+			.andReturn().getResponse().getContentAsString();
+		String retry = mvc.perform(transfer(alice, bob, 300, key))
+			.andExpect(status().isCreated())
+			.andReturn().getResponse().getContentAsString();
+
+		assertThat(retry).isEqualTo(first);
+		mvc.perform(get("/api/accounts/{id}", alice)).andExpect(jsonPath("$.balance").value(700));
+		mvc.perform(transfer(alice, bob, 400, key))
+			.andExpect(status().is(422))
+			.andExpect(jsonPath("$.detail").value(containsString("different request")));
+	}
+
+	@Test
+	void concurrentRetriesMoveTheMoneyOnce() throws Exception {
+		UUID alice = ledger.open("Alice", "EUR").getId();
+		UUID bob = ledger.open("Bob", "EUR").getId();
+		ledger.deposit(alice, 1_000, UUID.randomUUID().toString());
+		String key = UUID.randomUUID().toString();
+		Callable<UUID> retry = () -> ledger.transfer(alice, bob, 300, key).getId();
+
+		Set<UUID> transferIds = new HashSet<>();
+		try (var pool = Executors.newVirtualThreadPerTaskExecutor()) {
+			for (Future<UUID> result : pool.invokeAll(Collections.nCopies(20, retry))) {
+				transferIds.add(result.get());
+			}
+		}
+
+		assertThat(transferIds).hasSize(1);
+		assertThat(ledger.account(alice).getBalance()).isEqualTo(700);
+		assertThat(ledger.account(bob).getBalance()).isEqualTo(300);
+	}
+
+	@Test
+	void aFailedTransferCanBeRetriedWithTheSameKey() throws Exception {
+		String alice = open("Alice", "EUR");
+		String bob = open("Bob", "EUR");
+		String key = UUID.randomUUID().toString();
+
+		mvc.perform(transfer(alice, bob, 500, key)).andExpect(status().isConflict());
+		mvc.perform(deposit(alice, 500)).andExpect(status().isCreated());
+		mvc.perform(transfer(alice, bob, 500, key)).andExpect(status().isCreated());
+
+		mvc.perform(get("/api/accounts/{id}", bob)).andExpect(jsonPath("$.balance").value(500));
+	}
+
+	@Test
 	void errorsComeBackAsProblemDetails() throws Exception {
 		String alice = open("Alice", "EUR");
 		String bob = open("Bob", "EUR");
@@ -70,6 +130,8 @@ class LedgerIntegrationTests {
 		mvc.perform(transfer(alice, carol, 1)).andExpect(status().isBadRequest());
 		mvc.perform(transfer(alice, alice, 1)).andExpect(status().isBadRequest());
 		mvc.perform(transfer(alice, bob, 0)).andExpect(status().isBadRequest());
+		mvc.perform(transfer(alice, bob, 1, null)).andExpect(status().isBadRequest());
+		mvc.perform(transfer(alice, bob, 1, " ")).andExpect(status().isBadRequest());
 		mvc.perform(openRequest("Dave", "XXX")).andExpect(status().isBadRequest());
 		mvc.perform(get("/api/accounts/{id}/entries?size=101", alice)).andExpect(status().isBadRequest());
 
@@ -82,7 +144,7 @@ class LedgerIntegrationTests {
 		List<UUID> accounts = new ArrayList<>();
 		for (int i = 0; i < 20; i++) {
 			UUID id = ledger.open("Account " + i, "EUR").getId();
-			ledger.deposit(id, 100_000);
+			ledger.deposit(id, 100_000, UUID.randomUUID().toString());
 			accounts.add(id);
 		}
 
@@ -94,7 +156,7 @@ class LedgerIntegrationTests {
 				continue;
 			}
 			try {
-				ledger.transfer(from, to, 1 + random.nextInt(50_000));
+				ledger.transfer(from, to, 1 + random.nextInt(50_000), UUID.randomUUID().toString());
 			}
 			catch (InsufficientFundsException expected) {
 				rejected++;
@@ -136,12 +198,18 @@ class LedgerIntegrationTests {
 
 	private static MockHttpServletRequestBuilder deposit(String account, long amount) {
 		return post("/api/accounts/{id}/deposits", account).contentType(APPLICATION_JSON)
+			.header("Idempotency-Key", UUID.randomUUID().toString())
 			.content("{\"amount\": %d}".formatted(amount));
 	}
 
 	private static MockHttpServletRequestBuilder transfer(String from, String to, long amount) {
-		return post("/api/transfers").contentType(APPLICATION_JSON)
+		return transfer(from, to, amount, UUID.randomUUID().toString());
+	}
+
+	private static MockHttpServletRequestBuilder transfer(String from, String to, long amount, String key) {
+		MockHttpServletRequestBuilder request = post("/api/transfers").contentType(APPLICATION_JSON)
 			.content("{\"fromAccountId\": \"%s\", \"toAccountId\": \"%s\", \"amount\": %d}".formatted(from, to, amount));
+		return key == null ? request : request.header("Idempotency-Key", key);
 	}
 
 }

@@ -21,6 +21,7 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.ResponseStatus;
@@ -90,14 +91,18 @@ class LedgerController {
 
 	@PostMapping("/accounts/{id}/deposits")
 	@ResponseStatus(HttpStatus.CREATED)
-	TransferView deposit(@PathVariable UUID id, @Valid @RequestBody DepositRequest request) {
-		return TransferView.of(ledger.deposit(id, request.amount()));
+	TransferView deposit(@PathVariable UUID id,
+			@RequestHeader("Idempotency-Key") @NotBlank @Size(max = 100) String idempotencyKey,
+			@Valid @RequestBody DepositRequest request) {
+		return TransferView.of(ledger.deposit(id, request.amount(), idempotencyKey));
 	}
 
 	@PostMapping("/transfers")
 	@ResponseStatus(HttpStatus.CREATED)
-	TransferView transfer(@Valid @RequestBody TransferRequest request) {
-		return TransferView.of(ledger.transfer(request.fromAccountId(), request.toAccountId(), request.amount()));
+	TransferView transfer(@RequestHeader("Idempotency-Key") @NotBlank @Size(max = 100) String idempotencyKey,
+			@Valid @RequestBody TransferRequest request) {
+		return TransferView.of(ledger.transfer(request.fromAccountId(), request.toAccountId(), request.amount(),
+				idempotencyKey));
 	}
 
 	@ExceptionHandler
@@ -108,6 +113,11 @@ class LedgerController {
 	@ExceptionHandler
 	ProblemDetail insufficientFunds(InsufficientFundsException e) {
 		return ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, e.getMessage());
+	}
+
+	@ExceptionHandler
+	ProblemDetail keyReused(IdempotencyKeyReusedException e) {
+		return ProblemDetail.forStatusAndDetail(HttpStatus.UNPROCESSABLE_CONTENT, e.getMessage());
 	}
 
 	@ExceptionHandler

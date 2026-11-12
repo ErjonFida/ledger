@@ -13,7 +13,6 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.AdditionalAnswers.returnsFirstArg;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.never;
@@ -43,12 +42,11 @@ class LedgerServiceTests {
 
 	@Test
 	void aTransferWritesTwoEntriesThatSumToZero() {
-		when(accounts.findById(alice)).thenReturn(Optional.of(new Account("Alice", "EUR")));
-		when(accounts.findById(bob)).thenReturn(Optional.of(new Account("Bob", "EUR")));
+		bothInEuros();
+		when(transfers.insertIfKeyIsNew(any())).thenReturn(1);
 		when(accounts.debit(alice, 500)).thenReturn(1);
-		when(transfers.save(any())).thenAnswer(returnsFirstArg());
 
-		ledger.transfer(alice, bob, 500);
+		ledger.transfer(alice, bob, 500, "key-1");
 
 		verify(accounts).credit(bob, 500);
 		ArgumentCaptor<Entry> written = ArgumentCaptor.forClass(Entry.class);
@@ -58,15 +56,41 @@ class LedgerServiceTests {
 	}
 
 	@Test
-	void aTransferOverTheBalanceWritesNothing() {
-		when(accounts.findById(alice)).thenReturn(Optional.of(new Account("Alice", "EUR")));
-		when(accounts.findById(bob)).thenReturn(Optional.of(new Account("Bob", "EUR")));
+	void aTransferOverTheBalanceMovesNoMoney() {
+		bothInEuros();
+		when(transfers.insertIfKeyIsNew(any())).thenReturn(1);
 		when(accounts.debit(alice, 500)).thenReturn(0);
 
-		assertThatThrownBy(() -> ledger.transfer(alice, bob, 500)).isInstanceOf(InsufficientFundsException.class);
+		assertThatThrownBy(() -> ledger.transfer(alice, bob, 500, "key-1"))
+			.isInstanceOf(InsufficientFundsException.class);
 
 		verify(accounts, never()).credit(any(), anyLong());
-		verifyNoInteractions(transfers, entries);
+		verifyNoInteractions(entries);
+	}
+
+	@Test
+	void aRepeatedKeyReturnsTheFirstTransferAndMovesNoMoney() {
+		bothInEuros();
+		Transfer first = new Transfer(alice, bob, 500, "key-1");
+		when(transfers.insertIfKeyIsNew(any())).thenReturn(0);
+		when(transfers.findByIdempotencyKey("key-1")).thenReturn(Optional.of(first));
+
+		assertThat(ledger.transfer(alice, bob, 500, "key-1")).isSameAs(first);
+
+		verify(accounts, never()).debit(any(), anyLong());
+		verifyNoInteractions(entries);
+	}
+
+	@Test
+	void aKeyReusedForADifferentTransferIsRejected() {
+		bothInEuros();
+		when(transfers.insertIfKeyIsNew(any())).thenReturn(0);
+		when(transfers.findByIdempotencyKey("key-1")).thenReturn(Optional.of(new Transfer(alice, bob, 500, "key-1")));
+
+		assertThatThrownBy(() -> ledger.transfer(alice, bob, 900, "key-1"))
+			.isInstanceOf(IdempotencyKeyReusedException.class);
+
+		verify(accounts, never()).debit(any(), anyLong());
 	}
 
 	@Test
@@ -74,23 +98,31 @@ class LedgerServiceTests {
 		when(accounts.findById(alice)).thenReturn(Optional.of(new Account("Alice", "EUR")));
 		when(accounts.findById(bob)).thenReturn(Optional.of(new Account("Bob", "USD")));
 
-		assertThatThrownBy(() -> ledger.transfer(alice, bob, 500)).isInstanceOf(IllegalArgumentException.class);
+		assertThatThrownBy(() -> ledger.transfer(alice, bob, 500, "key-1"))
+			.isInstanceOf(IllegalArgumentException.class);
 
-		verify(accounts, never()).debit(any(), anyLong());
+		verifyNoInteractions(transfers);
 	}
 
 	@Test
 	void anAccountCannotTransferToItself() {
-		assertThatThrownBy(() -> ledger.transfer(alice, alice, 500)).isInstanceOf(IllegalArgumentException.class);
+		assertThatThrownBy(() -> ledger.transfer(alice, alice, 500, "key-1"))
+			.isInstanceOf(IllegalArgumentException.class);
 
-		verifyNoInteractions(accounts);
+		verifyNoInteractions(accounts, transfers);
 	}
 
 	@Test
 	void anUnknownAccountIsNotFound() {
 		when(accounts.findById(alice)).thenReturn(Optional.empty());
 
-		assertThatThrownBy(() -> ledger.transfer(alice, bob, 500)).isInstanceOf(NoSuchElementException.class);
+		assertThatThrownBy(() -> ledger.transfer(alice, bob, 500, "key-1"))
+			.isInstanceOf(NoSuchElementException.class);
+	}
+
+	private void bothInEuros() {
+		when(accounts.findById(alice)).thenReturn(Optional.of(new Account("Alice", "EUR")));
+		when(accounts.findById(bob)).thenReturn(Optional.of(new Account("Bob", "EUR")));
 	}
 
 }

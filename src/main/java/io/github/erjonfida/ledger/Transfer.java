@@ -1,11 +1,10 @@
 package io.github.erjonfida.ledger;
 
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.UUID;
 
 import jakarta.persistence.Entity;
-import jakarta.persistence.GeneratedValue;
-import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 
 import org.hibernate.annotations.Immutable;
@@ -15,7 +14,6 @@ import org.hibernate.annotations.Immutable;
 public class Transfer {
 
 	@Id
-	@GeneratedValue(strategy = GenerationType.UUID)
 	private UUID id;
 
 	private UUID fromAccountId;
@@ -26,14 +24,23 @@ public class Transfer {
 
 	private Instant createdAt;
 
+	private String idempotencyKey;
+
 	protected Transfer() {
 	}
 
-	Transfer(UUID fromAccountId, UUID toAccountId, long amount) {
+	Transfer(UUID fromAccountId, UUID toAccountId, long amount, String idempotencyKey) {
+		this.id = UUID.randomUUID();
 		this.fromAccountId = fromAccountId;
 		this.toAccountId = toAccountId;
 		this.amount = amount;
-		this.createdAt = Instant.now();
+		this.createdAt = Instant.now().truncatedTo(ChronoUnit.MICROS);
+		this.idempotencyKey = idempotencyKey;
+	}
+
+	boolean isSameRequestAs(Transfer other) {
+		return fromAccountId.equals(other.fromAccountId) && toAccountId.equals(other.toAccountId)
+				&& amount == other.amount;
 	}
 
 	public UUID getId() {
@@ -54,6 +61,10 @@ public class Transfer {
 
 	public Instant getCreatedAt() {
 		return createdAt;
+	}
+
+	public String getIdempotencyKey() {
+		return idempotencyKey;
 	}
 
 }
