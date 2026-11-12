@@ -1,0 +1,17 @@
+server:
+  port: 8094
+
+spring:
+  application:
+    name: ledger
+  datasource:
+    url: jdbc:postgresql://localhost:5443/ledger
+    username: ledger
+    password: ledger
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+  mvc:
+    problemdetails:
+      enabled: true
