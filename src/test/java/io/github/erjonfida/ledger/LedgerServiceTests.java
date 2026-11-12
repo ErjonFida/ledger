@@ -7,6 +7,7 @@ import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -15,6 +16,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -56,7 +58,7 @@ class LedgerServiceTests {
 	}
 
 	@Test
-	void aTransferOverTheBalanceMovesNoMoney() {
+	void aTransferOverTheBalanceIsRejected() {
 		bothInEuros();
 		when(transfers.insertIfKeyIsNew(any())).thenReturn(1);
 		when(accounts.debit(alice, 500)).thenReturn(0);
@@ -64,8 +66,25 @@ class LedgerServiceTests {
 		assertThatThrownBy(() -> ledger.transfer(alice, bob, 500, "key-1"))
 			.isInstanceOf(InsufficientFundsException.class);
 
-		verify(accounts, never()).credit(any(), anyLong());
 		verifyNoInteractions(entries);
+	}
+
+	@Test
+	void theAccountWithTheLowerIdIsUpdatedFirst() {
+		UUID low = new UUID(0, 1);
+		UUID high = new UUID(0, 2);
+		when(accounts.findById(any())).thenReturn(Optional.of(new Account("Any", "EUR")));
+		when(transfers.insertIfKeyIsNew(any())).thenReturn(1);
+		when(accounts.debit(any(), anyLong())).thenReturn(1);
+
+		ledger.transfer(low, high, 500, "key-1");
+		ledger.transfer(high, low, 500, "key-2");
+
+		InOrder order = inOrder(accounts);
+		order.verify(accounts).debit(low, 500);
+		order.verify(accounts).credit(high, 500);
+		order.verify(accounts).credit(low, 500);
+		order.verify(accounts).debit(high, 500);
 	}
 
 	@Test

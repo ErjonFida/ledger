@@ -58,14 +58,24 @@ public class LedgerService {
 		if (transfers.insertIfKeyIsNew(transfer) == 0) {
 			return replay(transfer);
 		}
-		// ponytail: rows are updated sender first, so two opposite transfers can deadlock; update in id order (roadmap 2)
-		if (accounts.debit(from, amount) == 0) {
-			throw new InsufficientFundsException(from, amount);
+		// Lower id first, so two opposite transfers lock the accounts in the same order and cannot deadlock
+		if (from.compareTo(to) < 0) {
+			debit(from, amount);
+			accounts.credit(to, amount);
 		}
-		accounts.credit(to, amount);
+		else {
+			accounts.credit(to, amount);
+			debit(from, amount);
+		}
 		entries.save(new Entry(transfer.getId(), from, -amount));
 		entries.save(new Entry(transfer.getId(), to, amount));
 		return transfer;
+	}
+
+	private void debit(UUID account, long amount) {
+		if (accounts.debit(account, amount) == 0) {
+			throw new InsufficientFundsException(account, amount);
+		}
 	}
 
 	private Transfer replay(Transfer request) {

@@ -46,6 +46,7 @@ The two requests that move money need an `Idempotency-Key` header, any string up
 - A deposit is a transfer from the currency's cash account, the only kind of account that may go negative.
 - A database `CHECK` stops every other balance from going below zero.
 - A transfer starts by inserting its row with `ON CONFLICT (idempotency_key) DO NOTHING`. If two retries arrive at once, PostgreSQL makes the second wait until the first commits, and it then returns the first one's transfer. A test sends 20 copies at once and checks the money moved once.
+- A transfer updates the account with the lower id first, whichever way the money goes. Two opposite transfers then lock the accounts in the same order, so they cannot deadlock.
 - A seeded test runs 10,000 random transfers, then checks that all entries sum to zero and every balance equals the sum of its entries.
 
 ## Roadmap

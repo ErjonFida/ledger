@@ -104,6 +104,28 @@ class LedgerIntegrationTests {
 	}
 
 	@Test
+	void opposingTransfersDoNotDeadlock() throws Exception {
+		UUID alice = ledger.open("Alice", "EUR").getId();
+		UUID bob = ledger.open("Bob", "EUR").getId();
+		ledger.deposit(alice, 1_000, UUID.randomUUID().toString());
+		ledger.deposit(bob, 1_000, UUID.randomUUID().toString());
+
+		List<Callable<Transfer>> transfers = new ArrayList<>();
+		for (int i = 0; i < 20; i++) {
+			transfers.add(() -> ledger.transfer(alice, bob, 1, UUID.randomUUID().toString()));
+			transfers.add(() -> ledger.transfer(bob, alice, 1, UUID.randomUUID().toString()));
+		}
+		try (var pool = Executors.newVirtualThreadPerTaskExecutor()) {
+			for (Future<Transfer> result : pool.invokeAll(transfers)) {
+				result.get();
+			}
+		}
+
+		assertThat(ledger.account(alice).getBalance()).isEqualTo(1_000);
+		assertThat(ledger.account(bob).getBalance()).isEqualTo(1_000);
+	}
+
+	@Test
 	void aFailedTransferCanBeRetriedWithTheSameKey() throws Exception {
 		String alice = open("Alice", "EUR");
 		String bob = open("Bob", "EUR");
@@ -126,6 +148,7 @@ class LedgerIntegrationTests {
 		mvc.perform(transfer(alice, bob, 101))
 			.andExpect(status().isConflict())
 			.andExpect(jsonPath("$.detail").value(containsString("does not have 101")));
+		mvc.perform(get("/api/accounts/{id}", bob)).andExpect(jsonPath("$.balance").value(0));
 		mvc.perform(transfer(alice, UUID.randomUUID().toString(), 1)).andExpect(status().isNotFound());
 		mvc.perform(transfer(alice, carol, 1)).andExpect(status().isBadRequest());
 		mvc.perform(transfer(alice, alice, 1)).andExpect(status().isBadRequest());

@@ -56,20 +56,10 @@ class TransferBenchmark {
 	volatile long deadline;
 
 	Outcome senderFirst(UUID from, UUID to) {
-		try {
-			return tx.execute(status -> {
-				if (timeUp()) {
-					return Outcome.TIME_UP;
-				}
-				jdbc.update("UPDATE account SET balance = balance - 1 WHERE id = ? AND (cash OR balance >= 1)", from);
-				jdbc.update("UPDATE account SET balance = balance + 1 WHERE id = ?", to);
-				return Outcome.DONE;
-			});
-		}
-		catch (PessimisticLockingFailureException deadlock) {
-			deadlocks.incrementAndGet();
-			return Outcome.DEADLOCK;
-		}
+		return attempt(() -> {
+			debit(from);
+			credit(to);
+		});
 	}
 
 	Outcome senderFirstWithRetry(UUID from, UUID to) {
@@ -81,6 +71,43 @@ class TransferBenchmark {
 		return outcome;
 	}
 
+	Outcome lowerIdFirst(UUID from, UUID to) {
+		return attempt(() -> {
+			if (from.compareTo(to) < 0) {
+				debit(from);
+				credit(to);
+			}
+			else {
+				credit(to);
+				debit(from);
+			}
+		});
+	}
+
+	Outcome attempt(Runnable updates) {
+		try {
+			return tx.execute(status -> {
+				if (timeUp()) {
+					return Outcome.TIME_UP;
+				}
+				updates.run();
+				return Outcome.DONE;
+			});
+		}
+		catch (PessimisticLockingFailureException deadlock) {
+			deadlocks.incrementAndGet();
+			return Outcome.DEADLOCK;
+		}
+	}
+
+	void debit(UUID account) {
+		jdbc.update("UPDATE account SET balance = balance - 1 WHERE id = ? AND (cash OR balance >= 1)", account);
+	}
+
+	void credit(UUID account) {
+		jdbc.update("UPDATE account SET balance = balance + 1 WHERE id = ?", account);
+	}
+
 	record Round(double throughput, double failedPercent, double deadlocksPer100, double p95Millis) {
 	}
 
@@ -89,6 +116,7 @@ class TransferBenchmark {
 		Map<String, BiFunction<UUID, UUID, Outcome>> strategies = new LinkedHashMap<>();
 		strategies.put("Sender first", this::senderFirst);
 		strategies.put("Sender first, retry on deadlock", this::senderFirstWithRetry);
+		strategies.put("Lower id first", this::lowerIdFirst);
 
 		StringBuilder table = new StringBuilder("""
 				| Strategy | Transfers/s | Failed | Deadlocks per 100 transfers | p95 latency (ms) |
@@ -103,6 +131,9 @@ class TransferBenchmark {
 			table.append(String.format(Locale.ROOT, "| %s | %.1f | %.0f%% | %.0f | %.0f |%n", strategy.getKey(),
 					median(rounds, Round::throughput), median(rounds, Round::failedPercent),
 					median(rounds, Round::deadlocksPer100), median(rounds, Round::p95Millis)));
+			if (strategy.getKey().equals("Lower id first")) {
+				assertThat(rounds).allSatisfy(r -> assertThat(r.deadlocksPer100()).isZero());
+			}
 		}
 
 		System.out.println(table);
