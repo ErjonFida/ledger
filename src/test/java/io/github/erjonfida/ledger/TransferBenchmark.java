@@ -108,7 +108,8 @@ class TransferBenchmark {
 		jdbc.update("UPDATE account SET balance = balance + 1 WHERE id = ?", account);
 	}
 
-	record Round(double throughput, double failedPercent, double deadlocksPer100, double p95Millis) {
+	record Round(double throughput, double failedPercent, double deadlocksPer100, double medianMillis,
+			double p99Millis) {
 	}
 
 	@Test
@@ -119,8 +120,8 @@ class TransferBenchmark {
 		strategies.put("Lower id first", this::lowerIdFirst);
 
 		StringBuilder table = new StringBuilder("""
-				| Strategy | Transfers/s | Failed | Deadlocks per 100 transfers | p95 latency (ms) |
-				|---|--:|--:|--:|--:|
+				| Strategy | Transfers/s | Failed | Deadlocks per 100 transfers | Median latency (ms) | p99 latency (ms) |
+				|---|--:|--:|--:|--:|--:|
 				""");
 		for (var strategy : strategies.entrySet()) {
 			round(strategy.getValue());
@@ -128,9 +129,10 @@ class TransferBenchmark {
 			for (int i = 0; i < ROUNDS; i++) {
 				rounds.add(round(strategy.getValue()));
 			}
-			table.append(String.format(Locale.ROOT, "| %s | %.1f | %.0f%% | %.0f | %.0f |%n", strategy.getKey(),
+			table.append(String.format(Locale.ROOT, "| %s | %.1f | %.0f%% | %.0f | %.0f | %.0f |%n", strategy.getKey(),
 					median(rounds, Round::throughput), median(rounds, Round::failedPercent),
-					median(rounds, Round::deadlocksPer100), median(rounds, Round::p95Millis)));
+					median(rounds, Round::deadlocksPer100), median(rounds, Round::medianMillis),
+					median(rounds, Round::p99Millis)));
 			if (strategy.getKey().equals("Lower id first")) {
 				assertThat(rounds).allSatisfy(r -> assertThat(r.deadlocksPer100()).isZero());
 			}
@@ -181,7 +183,11 @@ class TransferBenchmark {
 		long[] sorted = latencies.stream().mapToLong(Long::longValue).sorted().toArray();
 		int done = sorted.length;
 		return new Round(done / seconds, 100.0 * failed.get() / (done + failed.get()),
-				100.0 * deadlocks.get() / done, sorted[done * 95 / 100] / 1e6);
+				100.0 * deadlocks.get() / done, millisAt(sorted, 0.5), millisAt(sorted, 0.99));
+	}
+
+	static double millisAt(long[] sorted, double percentile) {
+		return sorted.length == 0 ? Double.NaN : sorted[(int) (sorted.length * percentile)] / 1e6;
 	}
 
 	boolean timeUp() {
