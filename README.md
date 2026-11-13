@@ -2,7 +2,7 @@
 
 Double-entry ledger API: accounts, deposits and transfers, where every movement of money is two entries that sum to zero.
 
-**Stack:** Java 25, Spring Boot 4.1, Spring Data JPA + Flyway, PostgreSQL, springdoc-openapi, JUnit, Mockito, Testcontainers.
+**Stack:** Java 25, Spring Boot 4.1, Spring Security, Spring Data JPA + Flyway, PostgreSQL, springdoc-openapi, JUnit, Mockito, Testcontainers.
 
 ## Run locally
 
@@ -23,8 +23,11 @@ On Windows PowerShell use `.\mvnw.cmd` instead of `./mvnw`.
 
 ## API
 
+Register a client to get an API key, then send it as an `X-API-Key` header on every other request. In Swagger UI, call `POST /api/clients`, then paste the key under **Authorize**. The key is shown only once.
+
 | Method | Path | What |
 |---|---|---|
+| POST | `/api/clients` | Register: `{"name": "Shop"}`. Returns the API key. Needs no key |
 | POST | `/api/accounts` | Open an account: `{"name": "Alice", "currency": "EUR"}`. EUR, USD or ALL |
 | GET | `/api/accounts/{id}` | The account and its balance |
 | GET | `/api/accounts/{id}/entries` | Its entries, newest first (`page`, `size` up to 100) |
@@ -43,7 +46,9 @@ The two requests that move money need an `Idempotency-Key` header, any string up
 
 - Entries are only ever inserted. A transfer writes one negative and one positive entry.
 - Each account also stores its balance, updated in the same transaction as the entries.
-- A deposit is a transfer from the currency's cash account, the only kind of account that may go negative.
+- A deposit is a transfer from the currency's cash account, the only kind of account that may go negative. Cash accounts belong to no client, so money only leaves them through a deposit.
+- Each client sees only its own accounts, and both accounts in a transfer must be the caller's. Another client's account answers 404, the same as one that does not exist.
+- API keys are 256 random bits, stored only as SHA-256 hashes. A fast hash is enough for random keys; slow hashes like bcrypt are for passwords people can guess.
 - A database `CHECK` stops every other balance from going below zero.
 - A transfer starts by inserting its row with `ON CONFLICT (idempotency_key) DO NOTHING`. If two retries arrive at once, PostgreSQL makes the second wait until the first commits, and it then returns the first one's transfer. A test sends 20 copies at once and checks the money moved once.
 - A transfer updates the account with the lower id first, whichever way the money goes. Two opposite transfers then lock the accounts in the same order, so they cannot deadlock.
@@ -75,6 +80,6 @@ Measured with Docker Desktop on Windows 11.
 
 - [x] 1. Core ledger: accounts, deposits, transfers, entry history, the balance invariant test
 - [x] 2. Retries and deadlocks: idempotency keys, the opposing-transfers experiment
-- [ ] 3. Client access: API keys with Spring Security, idempotency keys scoped to each client, rate limiting in Redis
+- [ ] 3. Client access: API keys with Spring Security (done), idempotency keys scoped to each client, rate limiting in Redis
 - [ ] 4. Deploy: Dockerfile, CI, AWS
 - [ ] 5. Batch reconciliation of bank statements with Spring Batch

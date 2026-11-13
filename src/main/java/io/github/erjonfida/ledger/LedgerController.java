@@ -5,6 +5,7 @@ import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.UUID;
 
+import io.swagger.v3.oas.annotations.security.SecurityRequirement;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
@@ -16,6 +17,7 @@ import jakarta.validation.constraints.Size;
 
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -29,6 +31,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 @RestController
 @RequestMapping("/api")
+@SecurityRequirement(name = "apiKey")
 class LedgerController {
 
 	record OpenAccountRequest(@NotBlank @Size(max = 100) String name,
@@ -74,35 +77,37 @@ class LedgerController {
 
 	@PostMapping("/accounts")
 	@ResponseStatus(HttpStatus.CREATED)
-	AccountView open(@Valid @RequestBody OpenAccountRequest request) {
-		return AccountView.of(ledger.open(request.name(), request.currency()));
+	AccountView open(@AuthenticationPrincipal UUID client, @Valid @RequestBody OpenAccountRequest request) {
+		return AccountView.of(ledger.open(client, request.name(), request.currency()));
 	}
 
 	@GetMapping("/accounts/{id}")
-	AccountView account(@PathVariable UUID id) {
-		return AccountView.of(ledger.account(id));
+	AccountView account(@AuthenticationPrincipal UUID client, @PathVariable UUID id) {
+		return AccountView.of(ledger.account(client, id));
 	}
 
 	@GetMapping("/accounts/{id}/entries")
-	List<EntryView> entries(@PathVariable UUID id, @RequestParam(defaultValue = "0") @Min(0) int page,
+	List<EntryView> entries(@AuthenticationPrincipal UUID client, @PathVariable UUID id,
+			@RequestParam(defaultValue = "0") @Min(0) int page,
 			@RequestParam(defaultValue = "50") @Min(1) @Max(100) int size) {
-		return ledger.entries(id, page, size).stream().map(EntryView::of).toList();
+		return ledger.entries(client, id, page, size).stream().map(EntryView::of).toList();
 	}
 
 	@PostMapping("/accounts/{id}/deposits")
 	@ResponseStatus(HttpStatus.CREATED)
-	TransferView deposit(@PathVariable UUID id,
+	TransferView deposit(@AuthenticationPrincipal UUID client, @PathVariable UUID id,
 			@RequestHeader("Idempotency-Key") @NotBlank @Size(max = 100) String idempotencyKey,
 			@Valid @RequestBody DepositRequest request) {
-		return TransferView.of(ledger.deposit(id, request.amount(), idempotencyKey));
+		return TransferView.of(ledger.deposit(client, id, request.amount(), idempotencyKey));
 	}
 
 	@PostMapping("/transfers")
 	@ResponseStatus(HttpStatus.CREATED)
-	TransferView transfer(@RequestHeader("Idempotency-Key") @NotBlank @Size(max = 100) String idempotencyKey,
+	TransferView transfer(@AuthenticationPrincipal UUID client,
+			@RequestHeader("Idempotency-Key") @NotBlank @Size(max = 100) String idempotencyKey,
 			@Valid @RequestBody TransferRequest request) {
-		return TransferView.of(ledger.transfer(request.fromAccountId(), request.toAccountId(), request.amount(),
-				idempotencyKey));
+		return TransferView.of(ledger.transfer(client, request.fromAccountId(), request.toAccountId(),
+				request.amount(), idempotencyKey));
 	}
 
 	@ExceptionHandler

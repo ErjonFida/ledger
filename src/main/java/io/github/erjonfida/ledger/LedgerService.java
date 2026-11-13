@@ -24,36 +24,42 @@ public class LedgerService {
 	}
 
 	@Transactional
-	public Account open(String name, String currency) {
+	public Account open(UUID client, String name, String currency) {
 		cashAccount(currency);
-		return accounts.save(new Account(name, currency));
+		return accounts.save(new Account(client, name, currency));
 	}
 
 	@Transactional(readOnly = true)
-	public Account account(UUID id) {
-		return accounts.findById(id).orElseThrow(() -> new NoSuchElementException("Unknown account " + id));
+	public Account account(UUID client, UUID id) {
+		return accounts.findById(id)
+			.filter(account -> account.belongsTo(client))
+			.orElseThrow(() -> new NoSuchElementException("Unknown account " + id));
 	}
 
 	@Transactional(readOnly = true)
-	public List<Entry> entries(UUID accountId, int page, int size) {
-		account(accountId);
+	public List<Entry> entries(UUID client, UUID accountId, int page, int size) {
+		account(client, accountId);
 		return entries.findByAccountIdOrderByIdDesc(accountId, PageRequest.of(page, size));
 	}
 
 	@Transactional
-	public Transfer deposit(UUID accountId, long amount, String idempotencyKey) {
-		Account cash = cashAccount(account(accountId).getCurrency());
-		return transfer(cash.getId(), accountId, amount, idempotencyKey);
+	public Transfer deposit(UUID client, UUID accountId, long amount, String idempotencyKey) {
+		Account cash = cashAccount(account(client, accountId).getCurrency());
+		return move(cash.getId(), accountId, amount, idempotencyKey);
 	}
 
 	@Transactional
-	public Transfer transfer(UUID from, UUID to, long amount, String idempotencyKey) {
+	public Transfer transfer(UUID client, UUID from, UUID to, long amount, String idempotencyKey) {
 		if (from.equals(to)) {
 			throw new IllegalArgumentException("Cannot transfer to the same account");
 		}
-		if (!account(from).getCurrency().equals(account(to).getCurrency())) {
+		if (!account(client, from).getCurrency().equals(account(client, to).getCurrency())) {
 			throw new IllegalArgumentException("The accounts are in different currencies");
 		}
+		return move(from, to, amount, idempotencyKey);
+	}
+
+	private Transfer move(UUID from, UUID to, long amount, String idempotencyKey) {
 		Transfer transfer = new Transfer(from, to, amount, idempotencyKey);
 		if (transfers.insertIfKeyIsNew(transfer) == 0) {
 			return replay(transfer);

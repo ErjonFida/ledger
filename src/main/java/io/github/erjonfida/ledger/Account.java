@@ -14,6 +14,8 @@ public class Account {
 	@GeneratedValue(strategy = GenerationType.UUID)
 	private UUID id;
 
+	private UUID clientId;
+
 	private String name;
 
 	private String currency;
@@ -25,9 +27,14 @@ public class Account {
 	protected Account() {
 	}
 
-	Account(String name, String currency) {
+	Account(UUID clientId, String name, String currency) {
+		this.clientId = clientId;
 		this.name = name;
 		this.currency = currency;
+	}
+
+	boolean belongsTo(UUID client) {
+		return client.equals(clientId);
 	}
 
 	public UUID getId() {

@@ -38,6 +38,8 @@ class LedgerServiceTests {
 	@InjectMocks
 	LedgerService ledger;
 
+	final UUID client = UUID.randomUUID();
+
 	final UUID alice = UUID.randomUUID();
 
 	final UUID bob = UUID.randomUUID();
@@ -48,7 +50,7 @@ class LedgerServiceTests {
 		when(transfers.insertIfKeyIsNew(any())).thenReturn(1);
 		when(accounts.debit(alice, 500)).thenReturn(1);
 
-		ledger.transfer(alice, bob, 500, "key-1");
+		ledger.transfer(client, alice, bob, 500, "key-1");
 
 		verify(accounts).credit(bob, 500);
 		ArgumentCaptor<Entry> written = ArgumentCaptor.forClass(Entry.class);
@@ -63,7 +65,7 @@ class LedgerServiceTests {
 		when(transfers.insertIfKeyIsNew(any())).thenReturn(1);
 		when(accounts.debit(alice, 500)).thenReturn(0);
 
-		assertThatThrownBy(() -> ledger.transfer(alice, bob, 500, "key-1"))
+		assertThatThrownBy(() -> ledger.transfer(client, alice, bob, 500, "key-1"))
 			.isInstanceOf(InsufficientFundsException.class);
 
 		verifyNoInteractions(entries);
@@ -73,12 +75,12 @@ class LedgerServiceTests {
 	void theAccountWithTheLowerIdIsUpdatedFirst() {
 		UUID low = new UUID(0, 1);
 		UUID high = new UUID(0, 2);
-		when(accounts.findById(any())).thenReturn(Optional.of(new Account("Any", "EUR")));
+		when(accounts.findById(any())).thenReturn(Optional.of(new Account(client, "Any", "EUR")));
 		when(transfers.insertIfKeyIsNew(any())).thenReturn(1);
 		when(accounts.debit(any(), anyLong())).thenReturn(1);
 
-		ledger.transfer(low, high, 500, "key-1");
-		ledger.transfer(high, low, 500, "key-2");
+		ledger.transfer(client, low, high, 500, "key-1");
+		ledger.transfer(client, high, low, 500, "key-2");
 
 		InOrder order = inOrder(accounts);
 		order.verify(accounts).debit(low, 500);
@@ -94,7 +96,7 @@ class LedgerServiceTests {
 		when(transfers.insertIfKeyIsNew(any())).thenReturn(0);
 		when(transfers.findByIdempotencyKey("key-1")).thenReturn(Optional.of(first));
 
-		assertThat(ledger.transfer(alice, bob, 500, "key-1")).isSameAs(first);
+		assertThat(ledger.transfer(client, alice, bob, 500, "key-1")).isSameAs(first);
 
 		verify(accounts, never()).debit(any(), anyLong());
 		verifyNoInteractions(entries);
@@ -106,18 +108,29 @@ class LedgerServiceTests {
 		when(transfers.insertIfKeyIsNew(any())).thenReturn(0);
 		when(transfers.findByIdempotencyKey("key-1")).thenReturn(Optional.of(new Transfer(alice, bob, 500, "key-1")));
 
-		assertThatThrownBy(() -> ledger.transfer(alice, bob, 900, "key-1"))
+		assertThatThrownBy(() -> ledger.transfer(client, alice, bob, 900, "key-1"))
 			.isInstanceOf(IdempotencyKeyReusedException.class);
 
 		verify(accounts, never()).debit(any(), anyLong());
 	}
 
 	@Test
-	void accountsInDifferentCurrenciesCannotTransfer() {
-		when(accounts.findById(alice)).thenReturn(Optional.of(new Account("Alice", "EUR")));
-		when(accounts.findById(bob)).thenReturn(Optional.of(new Account("Bob", "USD")));
+	void anotherClientsAccountIsNotFound() {
+		when(accounts.findById(alice)).thenReturn(Optional.of(new Account(UUID.randomUUID(), "Alice", "EUR")));
 
-		assertThatThrownBy(() -> ledger.transfer(alice, bob, 500, "key-1"))
+		assertThatThrownBy(() -> ledger.account(client, alice)).isInstanceOf(NoSuchElementException.class);
+		assertThatThrownBy(() -> ledger.transfer(client, alice, bob, 500, "key-1"))
+			.isInstanceOf(NoSuchElementException.class);
+
+		verifyNoInteractions(transfers);
+	}
+
+	@Test
+	void accountsInDifferentCurrenciesCannotTransfer() {
+		when(accounts.findById(alice)).thenReturn(Optional.of(new Account(client, "Alice", "EUR")));
+		when(accounts.findById(bob)).thenReturn(Optional.of(new Account(client, "Bob", "USD")));
+
+		assertThatThrownBy(() -> ledger.transfer(client, alice, bob, 500, "key-1"))
 			.isInstanceOf(IllegalArgumentException.class);
 
 		verifyNoInteractions(transfers);
@@ -125,7 +138,7 @@ class LedgerServiceTests {
 
 	@Test
 	void anAccountCannotTransferToItself() {
-		assertThatThrownBy(() -> ledger.transfer(alice, alice, 500, "key-1"))
+		assertThatThrownBy(() -> ledger.transfer(client, alice, alice, 500, "key-1"))
 			.isInstanceOf(IllegalArgumentException.class);
 
 		verifyNoInteractions(accounts, transfers);
@@ -135,13 +148,13 @@ class LedgerServiceTests {
 	void anUnknownAccountIsNotFound() {
 		when(accounts.findById(alice)).thenReturn(Optional.empty());
 
-		assertThatThrownBy(() -> ledger.transfer(alice, bob, 500, "key-1"))
+		assertThatThrownBy(() -> ledger.transfer(client, alice, bob, 500, "key-1"))
 			.isInstanceOf(NoSuchElementException.class);
 	}
 
 	private void bothInEuros() {
-		when(accounts.findById(alice)).thenReturn(Optional.of(new Account("Alice", "EUR")));
-		when(accounts.findById(bob)).thenReturn(Optional.of(new Account("Bob", "EUR")));
+		when(accounts.findById(alice)).thenReturn(Optional.of(new Account(client, "Alice", "EUR")));
+		when(accounts.findById(bob)).thenReturn(Optional.of(new Account(client, "Bob", "EUR")));
 	}
 
 }

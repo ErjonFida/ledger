@@ -12,37 +12,60 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 
 import com.jayway.jsonpath.JsonPath;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
+import org.springframework.test.web.servlet.setup.MockMvcBuilders;
+import org.springframework.web.context.WebApplicationContext;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.springframework.http.MediaType.APPLICATION_JSON;
+import static org.springframework.security.test.web.servlet.setup.SecurityMockMvcConfigurers.springSecurity;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @SpringBootTest
-@AutoConfigureMockMvc
 @Import(TestcontainersConfiguration.class)
 class LedgerIntegrationTests {
 
 	@Autowired
-	MockMvc mvc;
+	WebApplicationContext context;
 
 	@Autowired
 	LedgerService ledger;
 
 	@Autowired
+	ClientRepository clients;
+
+	@Autowired
 	JdbcTemplate jdbc;
+
+	MockMvc mvc;
+
+	MockMvc anonymous;
+
+	UUID client;
+
+	@BeforeEach
+	void registerClient() {
+		String apiKey = Client.newApiKey();
+		client = clients.save(new Client("Test", apiKey)).getId();
+		anonymous = MockMvcBuilders.webAppContextSetup(context).apply(springSecurity()).build();
+		mvc = MockMvcBuilders.webAppContextSetup(context)
+			.apply(springSecurity())
+			.defaultRequest(get("/").header("X-API-Key", apiKey))
+			.build();
+	}
 
 	@Test
 	void depositTransferAndHistoryOverHttp() throws Exception {
@@ -60,6 +83,44 @@ class LedgerIntegrationTests {
 			.andExpect(jsonPath("$[0].amount").value(-2_500))
 			.andExpect(jsonPath("$[1].amount").value(10_000));
 		mvc.perform(get("/api/accounts/{id}/entries?size=1", alice)).andExpect(jsonPath("$.length()").value(1));
+	}
+
+	@Test
+	void theApiNeedsAValidKey() throws Exception {
+		anonymous.perform(openRequest("Alice", "EUR")).andExpect(status().isUnauthorized());
+		anonymous.perform(openRequest("Alice", "EUR").header("X-API-Key", "not-a-key"))
+			.andExpect(status().isUnauthorized());
+
+		String registered = anonymous
+			.perform(post("/api/clients").contentType(APPLICATION_JSON).content("{\"name\": \"Shop\"}"))
+			.andExpect(status().isCreated())
+			.andReturn().getResponse().getContentAsString();
+		String apiKey = JsonPath.read(registered, "$.apiKey");
+
+		anonymous.perform(openRequest("Alice", "EUR").header("X-API-Key", apiKey)).andExpect(status().isCreated());
+		assertThat(jdbc.queryForObject("SELECT count(*) FROM client WHERE api_key_hash = ?", Long.class,
+				Client.hash(apiKey))).isOne();
+	}
+
+	@Test
+	void clientsCannotReachEachOthersAccounts() throws Exception {
+		String alice = open("Alice", "EUR");
+		mvc.perform(deposit(alice, 1_000)).andExpect(status().isCreated());
+		String otherKey = Client.newApiKey();
+		clients.save(new Client("Other", otherKey));
+		String eve = JsonPath.read(mvc.perform(openRequest("Eve", "EUR").header("X-API-Key", otherKey))
+			.andReturn().getResponse().getContentAsString(), "$.id");
+
+		mvc.perform(get("/api/accounts/{id}", alice).header("X-API-Key", otherKey)).andExpect(status().isNotFound());
+		mvc.perform(get("/api/accounts/{id}/entries", alice).header("X-API-Key", otherKey))
+			.andExpect(status().isNotFound());
+		mvc.perform(deposit(alice, 1).header("X-API-Key", otherKey)).andExpect(status().isNotFound());
+		mvc.perform(transfer(alice, eve, 1).header("X-API-Key", otherKey)).andExpect(status().isNotFound());
+		mvc.perform(transfer(eve, alice, 1).header("X-API-Key", otherKey)).andExpect(status().isNotFound());
+		String cash = jdbc.queryForObject("SELECT id FROM account WHERE cash AND currency = 'EUR'", String.class);
+		mvc.perform(transfer(cash, alice, 1)).andExpect(status().isNotFound());
+
+		mvc.perform(get("/api/accounts/{id}", alice)).andExpect(jsonPath("$.balance").value(1_000));
 	}
 
 	@Test
@@ -85,11 +146,11 @@ class LedgerIntegrationTests {
 
 	@Test
 	void concurrentRetriesMoveTheMoneyOnce() throws Exception {
-		UUID alice = ledger.open("Alice", "EUR").getId();
-		UUID bob = ledger.open("Bob", "EUR").getId();
-		ledger.deposit(alice, 1_000, UUID.randomUUID().toString());
+		UUID alice = ledger.open(client, "Alice", "EUR").getId();
+		UUID bob = ledger.open(client, "Bob", "EUR").getId();
+		ledger.deposit(client, alice, 1_000, UUID.randomUUID().toString());
 		String key = UUID.randomUUID().toString();
-		Callable<UUID> retry = () -> ledger.transfer(alice, bob, 300, key).getId();
+		Callable<UUID> retry = () -> ledger.transfer(client, alice, bob, 300, key).getId();
 
 		Set<UUID> transferIds = new HashSet<>();
 		try (var pool = Executors.newVirtualThreadPerTaskExecutor()) {
@@ -99,21 +160,21 @@ class LedgerIntegrationTests {
 		}
 
 		assertThat(transferIds).hasSize(1);
-		assertThat(ledger.account(alice).getBalance()).isEqualTo(700);
-		assertThat(ledger.account(bob).getBalance()).isEqualTo(300);
+		assertThat(ledger.account(client, alice).getBalance()).isEqualTo(700);
+		assertThat(ledger.account(client, bob).getBalance()).isEqualTo(300);
 	}
 
 	@Test
 	void opposingTransfersDoNotDeadlock() throws Exception {
-		UUID alice = ledger.open("Alice", "EUR").getId();
-		UUID bob = ledger.open("Bob", "EUR").getId();
-		ledger.deposit(alice, 1_000, UUID.randomUUID().toString());
-		ledger.deposit(bob, 1_000, UUID.randomUUID().toString());
+		UUID alice = ledger.open(client, "Alice", "EUR").getId();
+		UUID bob = ledger.open(client, "Bob", "EUR").getId();
+		ledger.deposit(client, alice, 1_000, UUID.randomUUID().toString());
+		ledger.deposit(client, bob, 1_000, UUID.randomUUID().toString());
 
 		List<Callable<Transfer>> transfers = new ArrayList<>();
 		for (int i = 0; i < 20; i++) {
-			transfers.add(() -> ledger.transfer(alice, bob, 1, UUID.randomUUID().toString()));
-			transfers.add(() -> ledger.transfer(bob, alice, 1, UUID.randomUUID().toString()));
+			transfers.add(() -> ledger.transfer(client, alice, bob, 1, UUID.randomUUID().toString()));
+			transfers.add(() -> ledger.transfer(client, bob, alice, 1, UUID.randomUUID().toString()));
 		}
 		try (var pool = Executors.newVirtualThreadPerTaskExecutor()) {
 			for (Future<Transfer> result : pool.invokeAll(transfers)) {
@@ -121,8 +182,8 @@ class LedgerIntegrationTests {
 			}
 		}
 
-		assertThat(ledger.account(alice).getBalance()).isEqualTo(1_000);
-		assertThat(ledger.account(bob).getBalance()).isEqualTo(1_000);
+		assertThat(ledger.account(client, alice).getBalance()).isEqualTo(1_000);
+		assertThat(ledger.account(client, bob).getBalance()).isEqualTo(1_000);
 	}
 
 	@Test
@@ -166,8 +227,8 @@ class LedgerIntegrationTests {
 		Random random = new Random(42);
 		List<UUID> accounts = new ArrayList<>();
 		for (int i = 0; i < 20; i++) {
-			UUID id = ledger.open("Account " + i, "EUR").getId();
-			ledger.deposit(id, 100_000, UUID.randomUUID().toString());
+			UUID id = ledger.open(client, "Account " + i, "EUR").getId();
+			ledger.deposit(client, id, 100_000, UUID.randomUUID().toString());
 			accounts.add(id);
 		}
 
@@ -179,7 +240,7 @@ class LedgerIntegrationTests {
 				continue;
 			}
 			try {
-				ledger.transfer(from, to, 1 + random.nextInt(50_000), UUID.randomUUID().toString());
+				ledger.transfer(client, from, to, 1 + random.nextInt(50_000), UUID.randomUUID().toString());
 			}
 			catch (InsufficientFundsException expected) {
 				rejected++;
@@ -199,8 +260,12 @@ class LedgerIntegrationTests {
 	}
 
 	@Test
-	void apiDocsAreServed() throws Exception {
-		mvc.perform(get("/v3/api-docs")).andExpect(jsonPath("$.paths['/api/transfers']").exists());
+	void apiDocsAreServedWithoutAKey() throws Exception {
+		anonymous.perform(get("/v3/api-docs"))
+			.andExpect(jsonPath("$.paths['/api/transfers']").exists())
+			.andExpect(jsonPath("$.paths['/api/accounts/{id}'].get.parameters[*].name", contains("id")))
+			.andExpect(jsonPath("$.components.securitySchemes.apiKey.name").value("X-API-Key"));
+		anonymous.perform(get("/swagger-ui/index.html")).andExpect(status().isOk());
 	}
 
 	private long count(String sql) {
